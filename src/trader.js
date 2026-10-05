@@ -34,6 +34,13 @@ class Trader {
     return Number(await this.token(address).decimals());
   }
 
+  // Read a balance pinned to a specific block. A load-balanced RPC can answer
+  // `latest` from a node that has not indexed the tx yet, which returns a stale
+  // value; pinning the block makes the reading deterministic.
+  async tokenBalanceAt(address, blockTag) {
+    return this.token(address).balanceOf(this.wallet.address, { blockTag });
+  }
+
   async tokenSymbol(address) {
     try {
       return await this.token(address).symbol();

@@ -80,6 +80,16 @@ async function panel(chatId, text, keyboard) {
   c.panelId = sent.message_id;
 }
 
+// Never let a Telegram hiccup (rate limit, network, deleted panel) abort the
+// trading loop. Losing a UI update is fine; losing the run is not.
+async function safePanel(chatId, text, keyboard) {
+  try {
+    await panel(chatId, text, keyboard);
+  } catch (err) {
+    console.error('panel error: ' + (err.message || err));
+  }
+}
+
 // ---------- screens ----------
 function menuText() {
   return [
@@ -148,6 +158,9 @@ async function balanceText() {
 function reportText(stats, requestedLoops) {
   const totalVolume = stats.buyVolume + stats.sellVolume;
   const netLoss = stats.buyVolume - stats.sellVolume;
+  // fee tier 10000 = 1% per swap, charged on both directions
+  const lpFee = (totalVolume * 100n) / 10000n;
+  const impact = netLoss > lpFee ? netLoss - lpFee : 0n;
   const totalCost = netLoss + stats.gasTotal;
   return [
     '📄 <b>LAPORAN SELESAI</b>',
@@ -161,9 +174,13 @@ function reportText(stats, requestedLoops) {
       'Sell volume  : ' + fmtEth(stats.sellVolume) + ' ETH\n' +
       'Total volume : ' + fmtEth(totalVolume) + ' ETH\n' +
       '\n' +
-      'Fee LP (est) : ' + fmtEth(netLoss) + ' ETH\n' +
+      'LP fee (est) : ' + fmtEth(lpFee) + ' ETH\n' +
+      'Impact/rugi  : ' + fmtEth(impact) + ' ETH\n' +
       'Gas total    : ' + fmtEth(stats.gasTotal) + ' ETH\n' +
-      'Total biaya  : ' + fmtEth(totalCost) + ' ETH' +
+      'Total biaya  : ' + fmtEth(totalCost) + ' ETH\n' +
+      '\n' +
+      'Rugi / loop  : ' + fmtEth(stats.loopsDone ? netLoss / BigInt(stats.loopsDone) : 0n) + ' ETH\n' +
+      'Rugi (%)     : ' + (stats.buyVolume ? (Number(netLoss) * 100 / Number(stats.buyVolume)).toFixed(2) : '0.00') + ' %' +
     '</pre>',
   ].join('\n');
 }
@@ -247,7 +264,7 @@ async function runLoop(chatId) {
     tokensSold: 0n,
   };
 
-  await panel(chatId, progressText(0, loops, stats, 'mulai...'), [[{ text: '⏹ Stop', callback_data: 'stop' }]]);
+  await safePanel(chatId, progressText(0, loops, stats, 'mulai...'), [[{ text: '⏹ Stop', callback_data: 'stop' }]]);
 
   try {
     for (let i = 1; i <= loops; i += 1) {
@@ -255,20 +272,29 @@ async function runLoop(chatId) {
 
       try {
         // ---- BUY ----
-        const before = await trader.tokenBalance(token);
         const { receipt: buyReceipt } = await trader.buy(token, amountEth);
-        const after = await trader.tokenBalance(token);
+        // Pin both reads to the buy's block: a load-balanced RPC answering
+        // `latest` from a lagging node used to yield received = 0 and stop the run.
+        const buyBlock = buyReceipt.blockNumber;
+        const before = await trader.tokenBalanceAt(token, buyBlock - 1);
+        const after = await trader.tokenBalanceAt(token, buyBlock);
         const received = after - before;
 
         stats.buyVolume += ethers.parseEther(amountEth);
         stats.gasTotal += gasFee(buyReceipt);
-        stats.tokensBought += received;
+        if (received > 0n) stats.tokensBought += received;
 
-        await panel(chatId, progressText(i, loops, stats, 'BUY ✅'), [[{ text: '⏹ Stop', callback_data: 'stop' }]]);
+        await safePanel(chatId, progressText(i, loops, stats, 'BUY ✅'), [[{ text: '⏹ Stop', callback_data: 'stop' }]]);
 
-        if (received === 0n) {
+        if (received <= 0n) {
           stats.loopsFailed += 1;
-          break;
+          await safePanel(
+            chatId,
+            '⚠️ <b>Loop ' + i + ' dilewati</b>\n\n<pre>Buy tidak terbaca menghasilkan token.\nLanjut ke loop berikutnya.</pre>',
+            [[{ text: '⏹ Stop', callback_data: 'stop' }]]
+          );
+          await sleep(config.delayMs);
+          continue;
         }
 
         await sleep(config.delayMs);
@@ -287,14 +313,14 @@ async function runLoop(chatId) {
         stats.tokensSold += received;
         stats.loopsDone += 1;
 
-        await panel(chatId, progressText(i, loops, stats, 'SELL ✅'), [[{ text: '⏹ Stop', callback_data: 'stop' }]]);
+        await safePanel(chatId, progressText(i, loops, stats, 'SELL ✅'), [[{ text: '⏹ Stop', callback_data: 'stop' }]]);
 
         await sleep(config.delayMs);
       } catch (err) {
         stats.loopsFailed += 1;
-        await panel(
+        await safePanel(
           chatId,
-          '⚠️ <b>Loop ' + i + ' gagal</b>\n\n<pre>' + esc(err.shortMessage || err.message) + '</pre>',
+          '⚠️ <b>Loop ' + i + ' gagal</b>\n\n<pre>' + esc(err.shortMessage || err.message) + '</pre>\n\n<i>Lanjut loop berikutnya…</i>',
           [[{ text: '⏹ Stop', callback_data: 'stop' }]]
         );
         await sleep(config.delayMs);
@@ -307,7 +333,7 @@ async function runLoop(chatId) {
 
     state.lastReport = reportText(stats, loops);
     const footer = stopped ? '\n\n⏹ <i>Dihentikan lebih awal.</i>' : '';
-    await panel(chatId, state.lastReport + footer, [
+    await safePanel(chatId, state.lastReport + footer, [
       [{ text: '🔁 Run lagi', callback_data: 'run' }],
       [{ text: '⚙️ Setup', callback_data: 'setup' }],
       [{ text: '🏠 Menu', callback_data: 'menu' }],
