@@ -38,7 +38,7 @@ class Trader {
     return (expected * (10000n - this.slippageBps)) / 10000n;
   }
 
-  // Buy token with ETH. Returns the transaction receipt.
+  // Buy token with ETH. Returns { receipt }.
   async buy(tokenAddress, amountEth) {
     const value = ethers.parseEther(String(amountEth));
     const base = {
@@ -63,16 +63,18 @@ class Trader {
       { ...base, amountOutMinimum: minOut },
       { value, gasLimit: this.gasLimit }
     );
-    return tx.wait();
+    const receipt = await tx.wait();
+    return { receipt };
   }
 
-  // Sell tokens back to ETH. Returns the transaction receipt.
+  // Sell tokens back to ETH. Returns { receipt, approveReceipt }.
   async sell(tokenAddress, amountTokens) {
     const erc20 = this.token(tokenAddress);
+    let approveReceipt = null;
     const allowance = await erc20.allowance(this.wallet.address, SWAP_ROUTER);
     if (allowance < amountTokens) {
       const approveTx = await erc20.approve(SWAP_ROUTER, ethers.MaxUint256);
-      await approveTx.wait();
+      approveReceipt = await approveTx.wait();
     }
 
     const swapParams = {
@@ -104,7 +106,8 @@ class Trader {
     const tx = await this.router.multicall([swapData, unwrapData], {
       gasLimit: this.gasLimit,
     });
-    return tx.wait();
+    const receipt = await tx.wait();
+    return { receipt, approveReceipt };
   }
 }
 

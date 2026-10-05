@@ -16,8 +16,10 @@ const state = {
   amountEth: config.defaultAmountEth,
   loops: Number.isFinite(config.defaultLoops) && config.defaultLoops > 0 ? config.defaultLoops : 1,
   decimals: 18,
+  symbol: '?',
   running: false,
   stopRequested: false,
+  lastReport: null,
 };
 
 const HELP = [
@@ -28,6 +30,7 @@ const HELP = [
   '/set <token> <eth> <loops> - set konfigurasi',
   '/run - mulai loop beli + jual',
   '/run <token> <eth> <loops> - run langsung',
+  '/report - laporan run terakhir',
   '/stop - hentikan loop',
 ].join('\n');
 
@@ -37,6 +40,41 @@ function isAdmin(id) {
 
 function fmtEth(wei) {
   return Number(ethers.formatEther(wei)).toFixed(6);
+}
+
+// Total gas fee (wei) paid for a transaction receipt.
+function gasFee(receipt) {
+  if (!receipt) return 0n;
+  if (receipt.fee !== undefined && receipt.fee !== null) return BigInt(receipt.fee);
+  return (receipt.gasUsed || 0n) * (receipt.gasPrice || 0n);
+}
+
+function buildReport(stats, requestedLoops) {
+  const totalVolume = stats.buyVolume + stats.sellVolume;
+  const netLoss = stats.buyVolume - stats.sellVolume;
+  const totalCost = netLoss + stats.gasTotal;
+
+  const lines = [
+    '*Laporan Selesai*',
+    '',
+    'Token        : ' + (state.symbol || '?'),
+    'Loop sukses  : ' + stats.loopsDone + '/' + requestedLoops,
+  ];
+  if (stats.loopsFailed > 0) lines.push('Loop gagal   : ' + stats.loopsFailed);
+  lines.push(
+    '',
+    'Buy volume   : ' + fmtEth(stats.buyVolume) + ' ETH',
+    'Sell volume  : ' + fmtEth(stats.sellVolume) + ' ETH',
+    'Total volume : ' + fmtEth(totalVolume) + ' ETH',
+    '',
+    'Fee LP (est) : ' + fmtEth(netLoss) + ' ETH',
+    'Gas total    : ' + fmtEth(stats.gasTotal) + ' ETH',
+    'Total biaya  : ' + fmtEth(totalCost) + ' ETH',
+    '',
+    'Token dibeli : ' + ethers.formatUnits(stats.tokensBought, state.decimals),
+    'Token dijual : ' + ethers.formatUnits(stats.tokensSold, state.decimals)
+  );
+  return lines.join('\n');
 }
 
 async function statusText() {
@@ -76,6 +114,17 @@ async function runLoop(chatId) {
   state.stopRequested = false;
   const token = state.token;
   state.decimals = await trader.tokenDecimals(token).catch(() => 18);
+  state.symbol = await trader.tokenSymbol(token).catch(() => '?');
+
+  const stats = {
+    loopsDone: 0,
+    loopsFailed: 0,
+    buyVolume: 0n,
+    sellVolume: 0n,
+    gasTotal: 0n,
+    tokensBought: 0n,
+    tokensSold: 0n,
+  };
 
   await bot.sendMessage(chatId, 'Mulai: ' + loops + 'x loop, ' + amountEth + ' ETH/tx\nToken: ' + token);
 
@@ -86,43 +135,68 @@ async function runLoop(chatId) {
         break;
       }
 
-      const before = await trader.tokenBalance(token);
-      const buyReceipt = await trader.buy(token, amountEth);
-      const after = await trader.tokenBalance(token);
-      const received = after - before;
+      try {
+        // ---- BUY ----
+        const before = await trader.tokenBalance(token);
+        const { receipt: buyReceipt } = await trader.buy(token, amountEth);
+        const after = await trader.tokenBalance(token);
+        const received = after - before;
 
-      await bot.sendMessage(
-        chatId,
-        '[' + i + '/' + loops + '] BUY ' + amountEth + ' ETH -> ' +
-          ethers.formatUnits(received, state.decimals) + ' token\n' + buyReceipt.hash
-      );
+        stats.buyVolume += ethers.parseEther(amountEth);
+        stats.gasTotal += gasFee(buyReceipt);
+        stats.tokensBought += received;
 
-      if (received === 0n) {
-        await bot.sendMessage(chatId, 'Dapat 0 token, loop dihentikan.');
-        break;
+        await bot.sendMessage(
+          chatId,
+          '[' + i + '/' + loops + '] BUY ' + amountEth + ' ETH -> ' +
+            ethers.formatUnits(received, state.decimals) + ' token\n' + buyReceipt.hash
+        );
+
+        if (received === 0n) {
+          await bot.sendMessage(chatId, 'Dapat 0 token, loop dihentikan.');
+          stats.loopsFailed += 1;
+          break;
+        }
+
+        await sleep(config.delayMs);
+        if (state.stopRequested) {
+          await bot.sendMessage(chatId, 'Dihentikan sebelum jual di loop ' + i + '.');
+          break;
+        }
+
+        // ---- SELL ----
+        const ethBeforeSell = await trader.ethBalance();
+        const { receipt: sellReceipt, approveReceipt } = await trader.sell(token, received);
+        const ethAfterSell = await trader.ethBalance();
+
+        const sellGas = gasFee(sellReceipt) + gasFee(approveReceipt);
+        const ethOut = ethAfterSell - ethBeforeSell + sellGas;
+
+        stats.sellVolume += ethOut > 0n ? ethOut : 0n;
+        stats.gasTotal += sellGas;
+        stats.tokensSold += received;
+        stats.loopsDone += 1;
+
+        await bot.sendMessage(
+          chatId,
+          '[' + i + '/' + loops + '] SELL ' +
+            ethers.formatUnits(received, state.decimals) + ' token -> ' +
+            fmtEth(ethOut) + ' ETH\n' + sellReceipt.hash
+        );
+
+        await sleep(config.delayMs);
+      } catch (err) {
+        stats.loopsFailed += 1;
+        await bot.sendMessage(chatId, '[' + i + '/' + loops + '] GAGAL: ' + (err.shortMessage || err.message));
       }
-
-      await sleep(config.delayMs);
-      if (state.stopRequested) {
-        await bot.sendMessage(chatId, 'Dihentikan sebelum jual di loop ' + i + '.');
-        break;
-      }
-
-      const sellReceipt = await trader.sell(token, received);
-      await bot.sendMessage(
-        chatId,
-        '[' + i + '/' + loops + '] SELL ' +
-          ethers.formatUnits(received, state.decimals) + ' token\n' + sellReceipt.hash
-      );
-
-      await sleep(config.delayMs);
     }
-  } catch (err) {
-    await bot.sendMessage(chatId, 'ERROR: ' + (err.shortMessage || err.message));
   } finally {
     state.running = false;
     state.stopRequested = false;
-    await bot.sendMessage(chatId, 'Selesai.');
+
+    const report = buildReport(stats, loops);
+    state.lastReport = report;
+    await bot.sendMessage(chatId, report, { parse_mode: 'Markdown' });
   }
 }
 
@@ -151,6 +225,10 @@ bot.on('message', async (msg) => {
 
       case '/status':
         await bot.sendMessage(chatId, await statusText(), { parse_mode: 'Markdown' });
+        break;
+
+      case '/report':
+        await bot.sendMessage(chatId, state.lastReport || 'Belum ada run.', state.lastReport ? { parse_mode: 'Markdown' } : {});
         break;
 
       case '/balance': {
@@ -189,6 +267,7 @@ bot.on('message', async (msg) => {
         state.amountEth = eth;
         state.loops = loops;
         state.decimals = await trader.tokenDecimals(token).catch(() => 18);
+        state.symbol = await trader.tokenSymbol(token).catch(() => '?');
         await bot.sendMessage(chatId, 'Diset.\n\n' + (await statusText()), { parse_mode: 'Markdown' });
         break;
       }
