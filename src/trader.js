@@ -34,6 +34,14 @@ class Trader {
     return Number(await this.token(address).decimals());
   }
 
+  async tokenSymbol(address) {
+    try {
+      return await this.token(address).symbol();
+    } catch (err) {
+      return '?';
+    }
+  }
+
   _minOut(expected) {
     return (expected * (10000n - this.slippageBps)) / 10000n;
   }

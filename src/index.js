@@ -427,6 +427,14 @@ bot.on('message', async (msg) => {
     await panel(chatId, menuText(), menuKeyboard());
   } catch (err) {
     await panel(chatId, '❌ Error: <pre>' + esc(err.shortMessage || err.message) + '</pre>', menuKeyboard());
+  } finally {
+    // Delete the user's own message so the chat stays clean on both sides.
+    // In private chats a bot is allowed to delete incoming messages.
+    try {
+      await bot.deleteMessage(chatId, msg.message_id);
+    } catch (err) {
+      // ignore (e.g. too old, or not permitted)
+    }
   }
 });
 
