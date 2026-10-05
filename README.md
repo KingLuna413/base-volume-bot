@@ -31,13 +31,21 @@ npm start
 
 | Command | Description |
 |---|---|
-| `/status` | Show current config |
-| `/balance` | Show ETH and token balance |
-| `/set <token> <eth> <loops>` | Set token, ETH per tx, number of loops |
+| `/start` | Main menu panel |
+| `/setup` | Guided setup: token -> ETH per tx -> loops |
 | `/run` | Start the loop |
 | `/run <token> <eth> <loops>` | Start directly with args |
-| `/report` | Show the last run report |
 | `/stop` | Stop the loop |
+| `/status` | Show current config |
+| `/balance` | Show ETH and token balance |
+| `/report` | Show the last run report |
+
+### UI behaviour
+
+- All commands are registered with `setMyCommands`, so they appear behind the blue **Menu** button next to the message box.
+- The bot keeps **one editable panel per chat**: every new action replaces the previous panel instead of stacking new messages, so the chat stays clean.
+- `/setup` is a 3-step guided flow (token -> ETH -> loops). Each step replaces the previous message.
+- Inline buttons are used for Setup / Run / Status / Balance / Report / Stop.
 
 ## Run report
 
