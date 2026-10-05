@@ -1,0 +1,18 @@
+{
+  "name": "base-volume-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Telegram-controlled Uniswap V3 buy/sell volume loop bot on Base",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.4",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
