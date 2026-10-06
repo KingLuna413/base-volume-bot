@@ -6,7 +6,7 @@ Telegram-controlled Uniswap V3 buy/sell loop bot on **Base**.
 
 ## What it does
 
-- Connects to Telegram; only the configured admin user ID can use it.
+-- Connects to Telegram; only the configured admin user ID can use it.
 - Buys your token with a fixed amount of ETH, then sells the tokens back, repeated N times.
 - Targets Uniswap V3 pools with the **1% fee tier** (ape.store style tokens).
 - Router: Uniswap V3 SwapRouter02 `0x2626664c2603336E57B271c5C0b26F421741e481`.
